@@ -22,6 +22,7 @@ import math
 import struct
 import ctypes
 import os
+import mmap
 import comfy.memory_management
 import safetensors.torch
 import numpy as np
@@ -82,6 +83,66 @@ _TYPES = {
     "U16": torch.uint16,
 }
 
+def warmup_mmap(mm):
+    if hasattr(mm, "madvise"):
+        try:
+            # Hint the kernel for sequential access and immediate loading
+            mm.madvise(mmap.MADV_SEQUENTIAL)
+            mm.madvise(mmap.MADV_WILLNEED)
+            if hasattr(mmap, "MADV_HUGEPAGE"):
+                mm.madvise(mmap.MADV_HUGEPAGE)
+                logging.debug("mmap: MADV_HUGEPAGE hint applied")
+        except Exception as e:
+            logging.debug(f"madvise failed: {e}")
+
+    # Touching each 4KB page populates the page tables (PTEs) and TLB.
+    # Using numpy is much faster for this evaluation.
+    try:
+        # 4096 is the standard page size.
+        # [::4096] creates a view, .sum() iterates and touches one byte per page.
+        _ = np.frombuffer(mm, dtype=np.uint8)[::4096].sum()
+    except Exception as e:
+        logging.warning(f"Numpy warmup failed, falling back to manual touch: {e}")
+        for i in range(0, len(mm), 4096):
+            _ = mm[i]
+
+def load_safetensors_mmap(ckpt):
+    f = open(ckpt, "rb")
+    file_size = os.path.getsize(ckpt)
+    comfy.model_management.print_memory_stats()
+    logging.info(f'ckpt: {ckpt}, file_size: {file_size / 1024 / 1024 / 1024:.4f} GB')
+
+    # Use standard Python mmap instead of comfy_aimdo
+    mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+    warmup_mmap(mm)
+    mv = memoryview(mm)
+
+    header_size = struct.unpack("<Q", mv[:8])[0]
+    header = json.loads(mv[8:8 + header_size].tobytes().decode("utf-8"))
+
+    data_base_offset = 8 + header_size
+    mv_data = mv[data_base_offset:]
+
+    sd = {}
+    for name, info in header.items():
+        if name == "__metadata__":
+            continue
+
+        start, end = info["data_offsets"]
+        if start == end:
+            sd[name] = torch.empty(info["shape"], dtype =_TYPES[info["dtype"]])
+        else:
+            with warnings.catch_warnings():
+                # We are working with read-only RAM by design
+                warnings.filterwarnings("ignore", message="The given buffer is not writable")
+                tensor = torch.frombuffer(mv_data[start:end], dtype=_TYPES[info["dtype"]]).view(info["shape"])
+                storage = tensor.untyped_storage()
+                # Keep references to prevent premature closing
+                setattr(storage, "_comfy_tensor_mmap_refs", (mm, f))
+                sd[name] = tensor
+
+    return sd, header.get("__metadata__", {})
+
 def load_safetensors(ckpt):
     import comfy_aimdo.model_mmap
 
@@ -125,7 +186,11 @@ def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):
     metadata = None
     if ckpt.lower().endswith(".safetensors") or ckpt.lower().endswith(".sft"):
         try:
-            if comfy.memory_management.aimdo_enabled:
+            if args.fast_mmap_load:
+                sd, metadata = load_safetensors_mmap(ckpt)
+                if not return_metadata:
+                    metadata = None
+            elif comfy.memory_management.aimdo_enabled:
                 sd, metadata = load_safetensors(ckpt)
                 if not return_metadata:
                     metadata = None

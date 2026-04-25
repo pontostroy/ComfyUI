@@ -29,6 +29,8 @@ if __name__ == "__main__":
     os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
     os.environ['DO_NOT_TRACK'] = '1'
 
+for handler in logging.root.handlers:
+    handler.setFormatter(logging.Formatter('[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S'))
 faulthandler.enable(file=sys.stderr, all_threads=False)
 
 import comfy_aimdo.control
@@ -293,6 +295,7 @@ def prompt_worker(q, server_instance):
     gc_collect_interval = 10.0
 
     while True:
+        comfy.model_management.print_memory_stats()
         timeout = 1000.0
         if need_gc:
             timeout = max(gc_collect_interval - (current_time - last_gc_collect), 0.0)
@@ -342,11 +345,16 @@ def prompt_worker(q, server_instance):
         free_memory = flags.get("free_memory", False)
 
         if flags.get("unload_models", free_memory):
+            logging.info("Unloading all models...")
+            if args.fast_unload_models:
+                logging.info("Fast unload mode: Forcing cache reset to drop executor references and VRAM.")
+                e.reset()
             comfy.model_management.unload_all_models()
             need_gc = True
             last_gc_collect = 0
 
         if free_memory:
+            logging.info("Freeing memory...")
             e.reset()
             need_gc = True
             last_gc_collect = 0

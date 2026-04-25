@@ -239,6 +239,15 @@ database_default_path = os.path.abspath(
 parser.add_argument("--database-url", type=str, default=f"sqlite:///{database_default_path}", help="Specify the database URL, e.g. for an in-memory database you can use 'sqlite:///:memory:'.")
 parser.add_argument("--enable-assets", action="store_true", help="Enable the assets system (API routes, database synchronization, and background scanning).")
 
+parser.add_argument("--fast-mmap-load", action="store_true",
+    help="Enable high-performance model loading using mmap with page cache warmup.")
+
+parser.add_argument("--cuda-uma", action="store_true",
+    help="Enable optimizations for NVIDIA/CUDA CPU-GPU Unified Memory Architecture (UMA).")
+
+parser.add_argument("--fast-unload-models", action="store_true",
+    help="Immediately release models from VRAM/cache without RAM backup to speed up memory recovery.")
+
 if comfy.options.args_parsing:
     args = parser.parse_args()
 else:

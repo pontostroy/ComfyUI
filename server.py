@@ -1018,6 +1018,7 @@ class PromptServer():
             json_data = await request.json()
             unload_models = json_data.get("unload_models", False)
             free_memory = json_data.get("free_memory", False)
+            logging.info(f"Received free request: unload_models={unload_models}, free_memory={free_memory}")
             if unload_models:
                 self.prompt_queue.set_flag("unload_models", unload_models)
             if free_memory:

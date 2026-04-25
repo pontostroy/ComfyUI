@@ -620,7 +620,10 @@ class LoadedModel:
             self._patcher_finalizer.detach()
 
     def is_dead(self):
-        return self.real_model() is not None and self.model is None
+        real_model = self.real_model
+        if real_model is None:
+            return False
+        return real_model() is not None and self.model is None
 
 
 def use_more_memory(extra_memory, loaded_models, device):
@@ -868,7 +871,8 @@ def archive_model_dtypes(model):
 def cleanup_models():
     to_delete = []
     for i in range(len(current_loaded_models)):
-        if current_loaded_models[i].real_model() is None:
+        real_model = current_loaded_models[i].real_model
+        if real_model is None or real_model() is None:
             to_delete = [i] + to_delete
 
     for i in to_delete:
@@ -1288,6 +1292,9 @@ def cast_to_gathered(tensors, r, non_blocking=False, stream=None):
 
 
 def cast_to(weight, dtype=None, device=None, non_blocking=False, copy=False, stream=None, r=None):
+    if device != weight.device:
+        logging.debug(f"weight.device: {weight.device}, weight.dtype: {weight.dtype}, device: {device}, dtype: {dtype}, "
+                     f"non_blocking: {non_blocking}, copy: {copy}, stream: {stream}, r: {r}")
     if device is None or weight.device == device:
         if not copy:
             if dtype is None or weight.dtype == dtype:
@@ -1480,6 +1487,39 @@ def force_upcast_attention_dtype():
     else:
         return None
 
+def get_uma_free_memory_bytes():
+    """
+    Calculates the actual allocatable device memory in a DGX Spark (UMA architecture)
+    environment directly through /proc/meminfo.
+    """
+    available_memory_kb = -1
+    try:
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    available_memory_kb = int(line.split()[1])
+    except Exception as e:
+        logging.error(f"Error reading /proc/meminfo: {e}")
+        return 0
+    # Convert KB unit to Byte unit and return
+    if available_memory_kb != -1:
+        return available_memory_kb * 1024
+    return 0
+
+_last_mem_available = None
+
+def print_memory_stats():
+    global _last_mem_available
+    dev = torch.device(torch.cuda.current_device())
+    reserved_bytes = torch.cuda.memory_stats(dev)['reserved_bytes.all.current']
+    current_mem = get_uma_free_memory_bytes()
+    diff_str = ""
+    if _last_mem_available is not None:
+        diff = (_last_mem_available - current_mem) / 1024 / 1024 / 1024
+        diff_str = f", Used: {diff:+.4f} GB"
+    _last_mem_available = current_mem
+    logging.info(f"MemAvailable: {current_mem / 1024 / 1024 / 1024:.4f} GB{diff_str}, Cuda Reserved: {reserved_bytes / 1024 / 1024 / 1024:.4f} GB")
+
 def get_free_memory(dev=None, torch_free_too=False):
     global directml_enabled
     if dev is None:
@@ -1517,7 +1557,10 @@ def get_free_memory(dev=None, torch_free_too=False):
             stats = torch.cuda.memory_stats(dev)
             mem_active = stats['active_bytes.all.current']
             mem_reserved = stats['reserved_bytes.all.current']
-            mem_free_cuda, _ = torch.cuda.mem_get_info(dev)
+            if args.cuda_uma:
+                mem_free_cuda = get_uma_free_memory_bytes()
+            else:
+                mem_free_cuda, _ = torch.cuda.mem_get_info(dev)
             mem_free_torch = mem_reserved - mem_active
             mem_free_total = mem_free_cuda + mem_free_torch
 
@@ -1793,8 +1836,39 @@ def soft_empty_cache(force=False):
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
 
+def free_memory_uma():
+    global current_loaded_models
+    logging.info("Fast unload: Clearing loaded models without VRAM-to-RAM backup.")
+    print_memory_stats()
+
+    # Forcefully sever any patcher/model references to immediately free VRAM without backup
+    for loaded_model in current_loaded_models:
+        if loaded_model.model_finalizer:
+            loaded_model.model_finalizer.detach()
+            loaded_model.model_finalizer = None
+        loaded_model.real_model = None
+
+        # Nuke patches from the patcher to drop tensor references
+        if hasattr(loaded_model, "model") and loaded_model.model:
+            patcher = loaded_model.model
+            patcher.backup.clear()
+            patcher.patches.clear()
+            patcher.object_patches.clear()
+            if hasattr(patcher, "model"):
+                # Break reference to actual model torch.nn.Module
+                patcher.model = None
+
+    current_loaded_models.clear()
+    gc.collect()
+    soft_empty_cache()
+    logging.info("UMA memory free: After unloading models.")
+    print_memory_stats()
+
 def unload_all_models():
-    free_memory(1e30, get_torch_device())
+    if args.fast_unload_models:
+        free_memory_uma()
+    else:
+        free_memory(1e30, get_torch_device())
 
 def debug_memory_summary():
     if is_amd() or is_nvidia():

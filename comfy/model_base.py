@@ -320,6 +320,9 @@ class BaseModel(torch.nn.Module):
         return out
 
     def load_model_weights(self, sd, unet_prefix="", assign=False):
+        if not assign:
+            assign = comfy.cli_args.args.cuda_uma
+
         to_load = {}
         keys = list(sd.keys())
         for k in keys:

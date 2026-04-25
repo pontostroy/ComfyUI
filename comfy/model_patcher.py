@@ -37,6 +37,7 @@ from comfy.comfy_types import UnetWrapperFunction
 from comfy.quant_ops import QuantizedTensor
 from comfy.patcher_extension import CallbacksMP, PatcherInjection, WrappersMP
 
+from comfy.cli_args import args
 import comfy_aimdo.model_vbar
 
 def set_model_options_patch_replace(model_options, patch, name, block_name, number, transformer_index=None):
@@ -693,6 +694,7 @@ class ModelPatcher:
         inplace_update = self.weight_inplace_update or inplace_update
 
         if key not in self.backup and not return_weight:
+            logging.info("Backing up weight: {} to {}, size: {:.2f}MB".format(key, self.offload_device, (weight.numel() * weight.element_size()) / (1024 * 1024)))
             self.backup[key] = collections.namedtuple('Dimension', ['weight', 'inplace_update'])(weight.to(device=self.offload_device, copy=inplace_update), inplace_update)
 
         temp_dtype = comfy.model_management.lora_compute_dtype(device_to) if key in self.patches else None
@@ -776,11 +778,15 @@ class ModelPatcher:
             lowvram_counter = 0
             lowvram_mem_counter = 0
             loading = self._load_list()
+            logging.debug("ModelPatcher load: full_load={}, device_to={}, lowvram_model_memory={:.2f}MB".format(full_load, device_to, lowvram_model_memory / (1024 * 1024)))
 
             load_completely = []
             offloaded = []
             offload_buffer = 0
             loading.sort(reverse=True)
+
+            prevent_weight_backup = getattr(args, "cuda_uma", False)
+
             for i, x in enumerate(loading):
                 module_offload_mem, module_mem, n, m, params = x
 
@@ -803,20 +809,23 @@ class ModelPatcher:
 
                 cast_weight = self.force_cast_weights
                 m.comfy_force_cast_weights = self.force_cast_weights
-                if lowvram_weight:
+
+                setup_patch = (lowvram_weight or prevent_weight_backup)
+
+                if setup_patch:
                     if hasattr(m, "comfy_cast_weights"):
                         m.weight_function = []
                         m.bias_function = []
 
                     if weight_key in self.patches:
-                        if force_patch_weights:
+                        if force_patch_weights and not prevent_weight_backup:
                             self.patch_weight_to_device(weight_key)
                         else:
                             _, set_func, convert_func = get_key_weight(self.model, weight_key)
                             m.weight_function = [LowVramPatch(weight_key, self.patches, convert_func, set_func)]
                             patch_counter += 1
                     if bias_key in self.patches:
-                        if force_patch_weights:
+                        if force_patch_weights and not prevent_weight_backup:
                             self.patch_weight_to_device(bias_key)
                         else:
                             _, set_func, convert_func = get_key_weight(self.model, bias_key)
@@ -824,10 +833,13 @@ class ModelPatcher:
                             patch_counter += 1
 
                     cast_weight = True
+
+                if lowvram_weight:
                     offloaded.append((module_mem, n, m, params))
                 else:
-                    if hasattr(m, "comfy_cast_weights"):
-                        wipe_lowvram_weight(m)
+                    if not prevent_weight_backup:
+                        if hasattr(m, "comfy_cast_weights"):
+                            wipe_lowvram_weight(m)
 
                     if full_load or lowvram_fits:
                         mem_counter += module_mem
@@ -859,7 +871,8 @@ class ModelPatcher:
                 for param in params:
                     key = key_param_name_to_key(n, param)
                     self.unpin_weight(key)
-                    self.patch_weight_to_device(key, device_to=device_to)
+                    if not prevent_weight_backup:
+                        self.patch_weight_to_device(key, device_to=device_to)
                 if comfy.model_management.is_device_cuda(device_to):
                     torch.cuda.synchronize()
 
@@ -883,8 +896,10 @@ class ModelPatcher:
                 logging.info("loaded completely; {} {:.2f} MB loaded, full load: {}".format(usable_stat, mem_counter / (1024 * 1024), full_load))
                 self.model.model_lowvram = False
                 if full_load:
-                    self.model.to(device_to)
+                    if not args.cuda_uma:
+                        self.model.to(device_to)
                     mem_counter = self.model_size()
+            comfy.model_management.print_memory_stats()
 
             self.model.lowvram_patch_counter += patch_counter
             self.model.device = device_to
@@ -1038,6 +1053,9 @@ class ModelPatcher:
             self.model.model_loaded_weight_memory -= memory_freed
             self.model.model_offload_buffer_memory = offload_buffer
             logging.info("Unloaded partially: {:.2f} MB freed, {:.2f} MB remains loaded, {:.2f} MB buffer reserved, lowvram patches: {}".format(memory_freed / (1024 * 1024), self.model.model_loaded_weight_memory / (1024 * 1024), offload_buffer / (1024 * 1024), self.model.lowvram_patch_counter))
+
+            comfy.model_management.print_memory_stats()
+
             return memory_freed
 
     def partially_load(self, device_to, extra_memory=0, force_patch_weights=False):
