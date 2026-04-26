@@ -1,3 +1,22 @@
+## 🚀 Optimized for NVIDIA DGX Spark
+This fork includes low-level performance enhancements specifically designed for NVIDIA Unified Memory Architecture (UMA).
+Use the following parameters to maximize hardware utilization on your system.
+
+### --fast-mmap-load
+Uses native mmap with madvise (SEQUENTIAL/WILLNEED) and page cache warmup (TLB touching) for near-instant model loading.
+
+### --cuda-uma
+Optimizes for CPU-GPU Unified Memory Architecture. Disables redundant RAM backups and utilizes direct weight assignment (assign=True) to reduce overhead.
+
+### --fast-unload-models
+Immediately releases models from VRAM/Cache by severing references. Prevents RAM-side backups during unload for faster memory recovery.
+
+### Execution Example
+To run ComfyUI with all optimizations enabled, use the following command:
+
+    python main.py --fast-mmap-load --cuda-uma --fast-unload-models
+##
+
 <div align="center">
 
 # ComfyUI
