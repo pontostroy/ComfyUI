@@ -1,0 +1,34 @@
+-r requirements.txt
+
+# SM121/Blackwell add-ons and pins used by the DGX patch guidance.
+# Keep torch/torchvision/torchaudio installed explicitly first from your CUDA index.
+xformers==0.0.32
+
+# SM121 stack notes from DGX patch set (explicitly listed for reproducibility).
+einops
+torchsde
+kornia>=0.7.1
+spandrel
+soundfile
+av>=14.2.0
+pydantic~=2.0
+pydantic-settings~=2.0
+alembic
+SQLAlchemy
+huggingface_hub[cli]
+transformers>=4.50.3
+tokenizers>=0.13.3
+sentencepiece
+safetensors>=0.4.2
+aiohttp>=3.11.8
+yarl>=1.18.0
+psutil
+tqdm
+Pillow
+scipy
+numpy>=1.25.0
+
+# Optional (recommended for --use-sage-attention):
+# Build from source in this environment:
+#   git clone --depth 1 https://github.com/thu-ml/SageAttention.git /tmp/sage
+#   cd /tmp/sage && TORCH_CUDA_ARCH_LIST="8.0;8.9;12.1" uv pip install --no-build-isolation -v .
