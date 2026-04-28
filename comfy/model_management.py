@@ -290,10 +290,68 @@ def raise_non_oom(e):
 
 XFORMERS_VERSION = ""
 XFORMERS_ENABLED_VAE = True
+
+def _is_nvidia_sm120_or_newer():
+    if not is_nvidia():
+        return False
+    try:
+        return torch.cuda.get_device_capability(get_torch_device()) >= (12, 0)
+    except:
+        return False
+
+
+def _apply_xformers_sm121_runtime_patches():
+    try:
+        from xformers.ops.fmha import cutlass as xformers_cutlass
+    except Exception as e:
+        logging.warning("Could not import xformers cutlass module for sm121 runtime patches: %s", e)
+        return
+
+    try:
+        from xformers.ops.fmha import flash3 as xformers_flash3
+        if os.environ.get("XFORMERS_DISABLE_FLASH_ATTN", "0") != "0":
+            xformers_flash3._C_flashattention3 = None
+    except Exception as e:
+        logging.warning("Could not import xformers flash3 module for sm121 runtime patches: %s", e)
+
+    max_compute_capability = (12, 0)
+    xformers_cutlass.FwOp.CUDA_MAXIMUM_COMPUTE_CAPABILITY = max_compute_capability
+    xformers_cutlass.BwOp.CUDA_MAXIMUM_COMPUTE_CAPABILITY = xformers_cutlass.FwOp.CUDA_MAXIMUM_COMPUTE_CAPABILITY
+
+    if getattr(xformers_cutlass.FwOp, "_comfy_sm121_patch_applied", False):
+        return
+
+    fw_not_supported_reasons = xformers_cutlass.FwOp.not_supported_reasons.__func__
+    bw_not_supported_reasons = xformers_cutlass.BwOp.not_supported_reasons.__func__
+
+    def _augment_not_supported_reasons(original_function, cls, d):
+        reasons = original_function(cls, d)
+        if d.device.type == "cuda":
+            device_capability = torch.cuda.get_device_capability(d.device)
+            if device_capability >= cls.CUDA_MAXIMUM_COMPUTE_CAPABILITY:
+                reasons.append(
+                    f"requires device with capability < {cls.CUDA_MAXIMUM_COMPUTE_CAPABILITY} "
+                    f"(got {device_capability}; CUTLASS FMHA kernels only cover sm60-sm100)"
+                )
+        return reasons
+
+    def _fw_not_supported_reasons(cls, d):
+        return _augment_not_supported_reasons(fw_not_supported_reasons, cls, d)
+
+    def _bw_not_supported_reasons(cls, d):
+        return _augment_not_supported_reasons(bw_not_supported_reasons, cls, d)
+
+    xformers_cutlass.FwOp.not_supported_reasons = classmethod(_fw_not_supported_reasons)
+    xformers_cutlass.BwOp.not_supported_reasons = classmethod(_bw_not_supported_reasons)
+    xformers_cutlass.FwOp._comfy_sm121_patch_applied = True
+
 if args.disable_xformers:
     XFORMERS_IS_AVAILABLE = False
 else:
     try:
+        if _is_nvidia_sm120_or_newer():
+            os.environ.setdefault("XFORMERS_DISABLE_FLASH_ATTN", "1")
+            logging.info("Set XFORMERS_DISABLE_FLASH_ATTN=1 for NVIDIA sm120+ runtime compatibility.")
         import xformers
         import xformers.ops
         XFORMERS_IS_AVAILABLE = True
@@ -310,6 +368,9 @@ else:
                 XFORMERS_ENABLED_VAE = False
         except:
             pass
+
+        if _is_nvidia_sm120_or_newer():
+            _apply_xformers_sm121_runtime_patches()
     except:
         XFORMERS_IS_AVAILABLE = False
 

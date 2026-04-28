@@ -15,6 +15,9 @@ Immediately releases models from VRAM/Cache by severing references. Prevents RAM
 To run ComfyUI with all optimizations enabled, use the following command:
 
     python main.py --fast-mmap-load --cuda-uma --fast-unload-models
+
+SM121 / Blackwell users: see the NVIDIA ARM64 section in [Manual Install](#manual-install-windows-linux)
+and the dedicated guide in [`COMFYUI_ARM64_SM121.md`](COMFYUI_ARM64_SM121.md).
 ##
 
 <div align="center">
@@ -298,6 +301,24 @@ Nvidia users should install stable pytorch using this command:
 This is the command to install pytorch nightly instead which might have performance improvements.
 
 ```pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu132```
+
+#### NVIDIA ARM64 (DGX Spark / GB10 / SM121) with `uv`
+
+If you are running on ARM64 Blackwell hardware (SM121), this sequence is recommended:
+
+```bash
+uv venv
+uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+uv pip install -r requirements-sm121.txt
+uv pip install -U --pre comfyui-manager
+uv run python main.py --fast-mmap-load --cuda-uma --fast-unload-models --use-sage-attention --listen 0.0.0.0 --enable-manager
+```
+
+Notes for SM121:
+- ComfyUI now auto-sets `XFORMERS_DISABLE_FLASH_ATTN=1` and applies runtime xformers SM121 guards on NVIDIA `sm120+` devices.
+- `--use-sage-attention` is still recommended for best stability/perf on Blackwell.
+- `requirements-sm121.txt` pins `xformers==0.0.32` and includes an explicit SM121 dependency block (including `soundfile` and `huggingface_hub[cli]`).
+- Source-build instructions for `SageAttention`, `xformers`, and `torchaudio` are in [`COMFYUI_ARM64_SM121.md`](COMFYUI_ARM64_SM121.md).
 
 #### Troubleshooting
 
